@@ -4,11 +4,14 @@ import java.util.*;
 
 class IntStringCappedMap extends AbstractMap<Integer, String> {
 
+    private static final int DEFAULT_SIZE = 16;
     private final long capacity;
-    private long currentFulfillment;
-    private IntStringCappedMap.MyEntry<Integer, String> root;
-    private IntStringCappedMap.MyEntry<Integer, String> current;
     private int size;
+    private int addedQuantity;
+    private MyEntry<Integer, String>[] map = new MyEntry[DEFAULT_SIZE];
+
+    private MyEntry<Integer, String>[] orderedArray = new MyEntry[100];
+    private int currentFilling;
 
     public IntStringCappedMap(final long capacity) {
         this.capacity = capacity;
@@ -21,22 +24,39 @@ class IntStringCappedMap extends AbstractMap<Integer, String> {
     @Override
     public Set<Entry<Integer, String>> entrySet() {
         return new AbstractSet<>() {
-            MyEntry<Integer, String> current;
-
             @Override
             public Iterator<Entry<Integer, String>> iterator() {
-                current = IntStringCappedMap.this.root;
+
                 return new Iterator<>() {
+                    MyEntry[] set;
+
+                    {
+                        set = new MyEntry[size];
+                        for (int x = 0, i = 0; i < map.length; i++) {
+                            if (map[i] != null) {
+                                MyEntry<Integer, String> entry = map[i];
+                                while (entry != null) {
+                                    set[x] = entry;
+                                    x++;
+                                    entry = entry.next;
+                                }
+                            }
+                        }
+                    }
+
+                    int current = 0;
+
                     @Override
                     public boolean hasNext() {
-                        return current.next != null;
+                        return current < set.length;
                     }
 
                     @Override
                     public Entry<Integer, String> next() {
-                        Entry<Integer, String> entry = current.next;
-                        if (entry == null) throw new NoSuchElementException();
-                        return entry;
+                        if (set[current] == null) return null;
+                        MyEntry<Integer, String> next = set[current];
+                        current++;
+                        return next;
                     }
                 };
             }
@@ -46,73 +66,184 @@ class IntStringCappedMap extends AbstractMap<Integer, String> {
                 return IntStringCappedMap.this.size();
             }
         };
+
+
     }
 
     @Override
     public String get(final Object key) {
-        Integer serachKey = (Integer) key;
-        MyEntry<Integer, String> currentEntry = root;
-        do {
-            if (currentEntry.getKey().equals(serachKey))
-                return currentEntry.getValue();
-        } while ((currentEntry = currentEntry.next) != null);
-        return null;
-    }
+        String value = null;
+        for (int i = 0; i < map.length; i++) {
+            if (map[i] == null) continue;
+            if (map[i].key.equals(key)) {
+                value = map[i].value;
+                break;
+            } else {
+                var listEntity = map[i];
+                while (listEntity.next != null) {
+                    listEntity = listEntity.next;
+                    if (listEntity.key.equals(key)) {
+                        value = listEntity.value;
+                        break;
+                    }
+                }
+            }
+        }
 
+        return value;
+    }
 
     @Override
     public String put(final Integer key, final String value) {
-        if (value.length() > capacity) throw new IllegalArgumentException();
-        MyEntry<Integer, String> currentEntry = root;
-        while ((currentFulfillment + value.length()) > capacity) changeRoot();
-        do {
-            if (currentEntry == null) {
-                root = new IntStringCappedMap.MyEntry<>(key, value);
-                current = root;
-                currentFulfillment += value.length();
-                size++;
-                return null;
-            } else if (currentEntry.key.equals(key)) {
-                String previous = currentEntry.value;
-                currentEntry.value = value;
-                currentFulfillment -= previous.length();
-                currentFulfillment += value.length();
-                size++;
-                return previous;
+        if (value == null || capacity < value.length()) throw new IllegalArgumentException();
+        MyEntry<Integer, String> newEntry = new MyEntry<>(key, value);
+
+        int position = calcPosition(key);
+
+        if (map[position] == null) {
+            map[position] = newEntry;
+            currentFilling += value.length();
+            while (needMoreSpace(value)) evictOldest();
+            orderedArray[addedQuantity] = newEntry;
+            addedQuantity++;
+            size++;
+        } else {
+            MyEntry<Integer, String> current = map[position];
+            if (current.key.equals(key)) {
+                String oldValue = current.value;
+                current.value = value;
+                currentFilling -= oldValue.length();
+                currentFilling += value.length();
+                changOrderedPosition(key);
+                while (needMoreSpace(value)) evictOldest();
+                return oldValue;
+            } else if (current.next == null) {
+                current.next = newEntry;
+                currentFilling += value.length();
+            } else {
+                while (current.next != null) {
+
+                    if (current.next.key.equals(key)) {
+                        String oldValue = current.next.value;
+                        current.next.value = value;
+                        currentFilling -= oldValue.length();
+                        currentFilling += value.length();
+                        changOrderedPosition(key);
+                        while (needMoreSpace(value)) evictOldest();
+                        return oldValue;
+                    }
+                    current = current.next;
+                    if (current.next == null) {
+                        current.next = newEntry;
+                        currentFilling += value.length();
+                        orderedArray[addedQuantity] = newEntry;
+                        addedQuantity++;
+                        size++;
+                        return null;
+                    }
+                }
             }
-        } while ((currentEntry = currentEntry.next) != null);
-        currentFulfillment += value.length();
-        current.next = new IntStringCappedMap.MyEntry<>(key, value);
-        current = current.next;
-        size++;
+        }
         return null;
     }
 
-    private void changeRoot() {
-        currentFulfillment -= root.value.length();
-        root = root.next;
+    private void changOrderedPosition(Integer key) {
+        for (int i = 0; i < addedQuantity; i++) {
+            if (orderedArray[i] == null) continue;
+            if (orderedArray[i].key.equals(key)) {
+                MyEntry<Integer, String>[] tmp = new MyEntry[orderedArray.length];
+                System.arraycopy(orderedArray, 0, tmp, 0, i);
+                System.arraycopy(orderedArray, i + 1, tmp, i, addedQuantity - i);
+                tmp[addedQuantity - 1] = orderedArray[i];
+                orderedArray = tmp;
+                return;
+            }
+        }
+    }
+
+    private void removeFromOrdered(Integer key) {
+        for (int i = 0; i < addedQuantity; i++) {
+            if (orderedArray[i].key.equals(key)) {
+                MyEntry<Integer, String>[] tmp = new MyEntry[orderedArray.length];
+                System.arraycopy(orderedArray, 0, tmp, 0, i);
+                System.arraycopy(orderedArray, i + 1, tmp, i, addedQuantity - i);
+                orderedArray = tmp;
+                return;
+            }
+        }
+    }
+
+    private void evictOldest() {
+        MyEntry<Integer, String> entry = orderedArray[0];
+        for (int i = 0; i < orderedArray.length; i++) {
+            if (orderedArray[i] != null) {
+                entry = orderedArray[i];
+                orderedArray[i] = null;
+                MyEntry<Integer, String>[] tmp = new MyEntry[orderedArray.length];
+                System.arraycopy(orderedArray, 0, tmp, 0, i);
+                System.arraycopy(orderedArray, i + 1, tmp, i, addedQuantity - i);
+                orderedArray = tmp;
+                break;
+            }
+        }
+        String value = "";
+        for (int i = 0; i < map.length; i++) {
+            if (map[i] == null) continue;
+            if (map[i].key.equals(entry.key)) {
+                if (map[i].next != null) {
+                    value = map[i].value;
+                    map[i] = map[i].next;
+                } else {
+                    value = map[i].value;
+                    map[i] = null;
+                }
+
+
+                currentFilling -= value.length();
+                size--;
+                addedQuantity--;
+                break;
+            }
+        }
+    }
+
+    private boolean needMoreSpace(String value) {
+        return currentFilling > capacity;
+    }
+
+    private int calcPosition(Integer key) {
+        return key.hashCode() % map.length;
     }
 
     @Override
     public String remove(final Object key) {
+        if (!(key instanceof Integer)) throw new IllegalArgumentException();
 
-        if (root == null) {
-            return null;
+        String removedValue = null;
+        int position = calcPosition((Integer) key);
+        var element = map[position];
+        MyEntry<Integer, String> elementNext;
+        if (map[position] == null) return null;
+        if (element.key.equals(key)) {
+            removedValue = map[position].value;
+            map[position] = element.next;
+        } else {
+            do {
+                elementNext = element.next;
+
+                if (elementNext.key.equals(key)) {
+                    removedValue = elementNext.value;
+                    element.next = elementNext.next;
+                    break;
+                }
+            } while ((element = element.next) != null);
         }
-        MyEntry<Integer, String> currentEntry;
-        MyEntry<Integer, String> previous = root;
-        if (root.key.equals((Integer) key)) {
-            root = previous.next;
-            return previous.value;
-        }
-        while (previous.next != null) {
-            currentEntry = previous.next;
-            if (currentEntry.key.equals(key)) {
-                previous.next = currentEntry.next;
-                return currentEntry.value;
-            }
-        }
-        return null;
+        removeFromOrdered((Integer) key);
+        currentFilling -= removedValue.length();
+        size--;
+        addedQuantity--;
+
+        return removedValue;
     }
 
     @Override
@@ -120,29 +251,40 @@ class IntStringCappedMap extends AbstractMap<Integer, String> {
         return size;
     }
 
-    private static class MyEntry<K, V> implements Entry<K, V> {
-        MyEntry<K, V> next;
-        K key;
-        V value;
+    @Override
+    public String toString() {
+        return super.toString();
+    }
 
-        private MyEntry(K key, V value) {
+    private static class MyEntry<Integer, String> implements Entry<Integer, String> {
+
+        Integer key;
+        String value;
+
+        MyEntry<Integer, String> next;
+
+        public MyEntry(Integer key, String value) {
             this.key = key;
             this.value = value;
         }
 
-        public K getKey() {
+        @Override
+        public Integer getKey() {
             return key;
         }
 
-        public V getValue() {
+        @Override
+        public String getValue() {
             return value;
         }
 
         @Override
-        public V setValue(V value) {
-            V oldValue = this.value;
+        public String setValue(String value) {
+            String old = value;
             this.value = value;
-            return oldValue;
+            return old;
         }
     }
+
+
 }
